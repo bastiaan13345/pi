@@ -1,8 +1,8 @@
 import { parseAsync } from "docx-preview";
+import { Workbook } from "exceljs";
 import JSZip from "jszip";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import * as pdfjsLib from "pdfjs-dist";
-import * as XLSX from "xlsx";
 import { i18n } from "./i18n.js";
 
 // Configure PDF.js worker - we'll need to bundle this
@@ -448,18 +448,25 @@ async function processPptx(arrayBuffer: ArrayBuffer, fileName: string): Promise<
 
 async function processExcel(arrayBuffer: ArrayBuffer, fileName: string): Promise<{ extractedText: string }> {
 	try {
-		// Read the workbook
-		const workbook = XLSX.read(arrayBuffer, { type: "array" });
+		const workbook = new Workbook();
+		await workbook.xlsx.load(arrayBuffer);
 
 		let extractedText = `<excel filename="${fileName}">`;
 
-		// Process each sheet
-		for (const [index, sheetName] of workbook.SheetNames.entries()) {
-			const worksheet = workbook.Sheets[sheetName];
-
-			// Extract text as CSV for the extractedText field
-			const csvText = XLSX.utils.sheet_to_csv(worksheet);
-			extractedText += `\n<sheet name="${sheetName}" index="${index + 1}">\n${csvText}\n</sheet>`;
+		for (const [index, worksheet] of workbook.worksheets.entries()) {
+			const rowCount = Math.max(worksheet.actualRowCount, worksheet.rowCount);
+			const columnCount = Math.max(worksheet.actualColumnCount, worksheet.columnCount);
+			const rows: string[] = [];
+			for (let rowIndex = 1; rowIndex <= rowCount; rowIndex++) {
+				const row = worksheet.getRow(rowIndex);
+				const values: string[] = [];
+				for (let columnIndex = 1; columnIndex <= columnCount; columnIndex++) {
+					const value = cellValueToText(row.getCell(columnIndex).value);
+					values.push(value.includes(",") || value.includes('"') ? `"${value.replaceAll('"', '""')}"` : value);
+				}
+				rows.push(values.join(","));
+			}
+			extractedText += `\n<sheet name="${worksheet.name}" index="${index + 1}">\n${rows.join("\n")}\n</sheet>`;
 		}
 
 		extractedText += "\n</excel>";
@@ -469,4 +476,27 @@ async function processExcel(arrayBuffer: ArrayBuffer, fileName: string): Promise
 		console.error("Error processing Excel:", error);
 		throw new Error(`Failed to process Excel: ${String(error)}`);
 	}
+}
+
+function cellValueToText(value: unknown): string {
+	if (value === null || value === undefined) return "";
+	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value === "object") {
+		if ("text" in value && typeof value.text === "string") return value.text;
+		if ("result" in value) return cellValueToText(value.result);
+		if ("richText" in value && Array.isArray(value.richText)) {
+			return value.richText
+				.map((part) => {
+					if (part && typeof part === "object" && "text" in part && typeof part.text === "string")
+						return part.text;
+					return "";
+				})
+				.join("");
+		}
+		if ("hyperlink" in value && typeof value.hyperlink === "string") return value.hyperlink;
+		if ("formula" in value && typeof value.formula === "string") return value.formula;
+		if ("error" in value && typeof value.error === "string") return value.error;
+	}
+	return String(value);
 }

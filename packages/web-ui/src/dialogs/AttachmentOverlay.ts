@@ -2,11 +2,11 @@ import "@mariozechner/mini-lit/dist/ModeToggle.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { renderAsync } from "docx-preview";
+import { Workbook, type Worksheet } from "exceljs";
 import { html, LitElement } from "lit";
 import { state } from "lit/decorators.js";
 import { Download, X } from "lucide";
 import * as pdfjsLib from "pdfjs-dist";
-import * as XLSX from "xlsx";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 
@@ -489,8 +489,8 @@ export class AttachmentOverlay extends LitElement {
 			// Convert base64 to ArrayBuffer
 			const arrayBuffer = this.base64ToArrayBuffer(this.attachment.content);
 
-			// Read the workbook
-			const workbook = XLSX.read(arrayBuffer, { type: "array" });
+			const workbook = new Workbook();
+			await workbook.xlsx.load(arrayBuffer);
 
 			// Clear container
 			container.innerHTML = "";
@@ -499,16 +499,16 @@ export class AttachmentOverlay extends LitElement {
 			container.appendChild(wrapper);
 
 			// Create tabs for multiple sheets
-			if (workbook.SheetNames.length > 1) {
+			if (workbook.worksheets.length > 1) {
 				const tabContainer = document.createElement("div");
 				tabContainer.className = "flex gap-2 mb-4 border-b border-border sticky top-0 bg-card z-10";
 
 				const sheetContents: HTMLElement[] = [];
 
-				workbook.SheetNames.forEach((sheetName, index) => {
+				workbook.worksheets.forEach((worksheet, index) => {
 					// Create tab button
 					const tab = document.createElement("button");
-					tab.textContent = sheetName;
+					tab.textContent = worksheet.name;
 					tab.className =
 						index === 0
 							? "px-4 py-2 text-sm font-medium border-b-2 border-primary text-primary"
@@ -518,7 +518,7 @@ export class AttachmentOverlay extends LitElement {
 					const sheetDiv = document.createElement("div");
 					sheetDiv.style.display = index === 0 ? "flex" : "none";
 					sheetDiv.className = "flex-1 overflow-auto";
-					sheetDiv.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
+					sheetDiv.appendChild(this.renderExcelSheet(worksheet));
 					sheetContents.push(sheetDiv);
 
 					// Tab click handler
@@ -547,8 +547,10 @@ export class AttachmentOverlay extends LitElement {
 				});
 			} else {
 				// Single sheet
-				const sheetName = workbook.SheetNames[0];
-				wrapper.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
+				const worksheet = workbook.worksheets[0];
+				if (worksheet) {
+					wrapper.appendChild(this.renderExcelSheet(worksheet));
+				}
 			}
 		} catch (error: any) {
 			console.error("Error rendering Excel:", error);
@@ -556,43 +558,46 @@ export class AttachmentOverlay extends LitElement {
 		}
 	}
 
-	private renderExcelSheet(worksheet: any, sheetName: string): HTMLElement {
+	private renderExcelSheet(worksheet: Worksheet): HTMLElement {
 		const sheetDiv = document.createElement("div");
-
-		// Generate HTML table
-		const htmlTable = XLSX.utils.sheet_to_html(worksheet, { id: `sheet-${sheetName}` });
-		const tempDiv = document.createElement("div");
-		tempDiv.innerHTML = htmlTable;
-
-		// Find and style the table
-		const table = tempDiv.querySelector("table");
-		if (table) {
-			table.className = "w-full border-collapse text-foreground";
-
-			// Style all cells
-			table.querySelectorAll("td, th").forEach((cell) => {
-				const cellEl = cell as HTMLElement;
-				cellEl.className = "border border-border px-3 py-2 text-sm text-left";
-			});
-
-			// Style header row
-			const headerCells = table.querySelectorAll("thead th, tr:first-child td");
-			if (headerCells.length > 0) {
-				headerCells.forEach((th) => {
-					const thEl = th as HTMLElement;
-					thEl.className =
+		const table = document.createElement("table");
+		table.className = "w-full border-collapse text-foreground";
+		const head = document.createElement("thead");
+		const body = document.createElement("tbody");
+		const rowCount = Math.max(worksheet.actualRowCount, worksheet.rowCount);
+		const columnCount = Math.max(worksheet.actualColumnCount, worksheet.columnCount);
+		for (let rowIndex = 1; rowIndex <= rowCount; rowIndex++) {
+			const row = worksheet.getRow(rowIndex);
+			const tr = document.createElement("tr");
+			for (let columnIndex = 1; columnIndex <= columnCount; columnIndex++) {
+				const cellValue = cellValueToText(row.getCell(columnIndex).value);
+				if (rowIndex === 1) {
+					const th = document.createElement("th");
+					th.className =
 						"border border-border px-3 py-2 text-sm font-semibold bg-muted text-foreground sticky top-0";
-				});
+					th.textContent = cellValue;
+					tr.appendChild(th);
+				} else {
+					const td = document.createElement("td");
+					td.className = "border border-border px-3 py-2 text-sm text-left";
+					td.textContent = cellValue;
+					tr.appendChild(td);
+				}
 			}
-
-			// Alternate row colors
-			table.querySelectorAll("tbody tr:nth-child(even)").forEach((row) => {
-				const rowEl = row as HTMLElement;
-				rowEl.className = "bg-muted/30";
-			});
-
-			sheetDiv.appendChild(table);
+			if (rowIndex === 1) {
+				head.appendChild(tr);
+			} else {
+				if (rowIndex % 2 === 0) tr.className = "bg-muted/30";
+				body.appendChild(tr);
+			}
 		}
+		if (head.childElementCount > 0) {
+			table.appendChild(head);
+		}
+		if (body.childElementCount > 0) {
+			table.appendChild(body);
+		}
+		sheetDiv.appendChild(table);
 
 		return sheetDiv;
 	}
@@ -628,6 +633,29 @@ export class AttachmentOverlay extends LitElement {
 			this.error = error?.message || i18n("Failed to display text content");
 		}
 	}
+}
+
+function cellValueToText(value: unknown): string {
+	if (value === null || value === undefined) return "";
+	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value === "object") {
+		if ("text" in value && typeof value.text === "string") return value.text;
+		if ("result" in value) return cellValueToText(value.result);
+		if ("richText" in value && Array.isArray(value.richText)) {
+			return value.richText
+				.map((part) => {
+					if (part && typeof part === "object" && "text" in part && typeof part.text === "string")
+						return part.text;
+					return "";
+				})
+				.join("");
+		}
+		if ("hyperlink" in value && typeof value.hyperlink === "string") return value.hyperlink;
+		if ("formula" in value && typeof value.formula === "string") return value.formula;
+		if ("error" in value && typeof value.error === "string") return value.error;
+	}
+	return String(value);
 }
 
 // Register the custom element only once
